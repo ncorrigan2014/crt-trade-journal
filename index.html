@@ -292,6 +292,7 @@
         <div class="export-menu" id="export-menu">
           <button class="export-item" onclick="exportJSON()">📦 JSON Backup</button>
           <button class="export-item" onclick="exportCSV()">📊 CSV for Excel</button>
+          <button class="export-item" onclick="restoreLocalBackup()">⟲ Restore Local Backup</button>
         </div>
       </div>
       <button class="btn-primary" onclick="openForm()">+ LOG TRADE</button>
@@ -513,21 +514,58 @@ async function dbFetch(path,options={}){
   if(!res.ok)throw new Error(`DB error: ${res.status}`);
   const text=await res.text();return text?JSON.parse(text):null;
 }
+const LOCAL_KEY='crt_journal_local_backup';
+function saveLocalSnapshot(){
+  try{
+    localStorage.setItem(LOCAL_KEY, JSON.stringify({ts:Date.now(), count:trades.length, trades:trades}));
+  }catch(e){}
+}
+function readLocalSnapshot(){
+  try{ const d=localStorage.getItem(LOCAL_KEY); return d?JSON.parse(d):null; }catch(e){ return null; }
+}
 async function loadTrades(){
   setSaveState('saving','Loading...');
   try{
     const rows=await dbFetch('crt_trades?id=eq.main&select=data');
-    trades=rows&&rows.length>0?rows[0].data||[]:[];
+    let cloud=rows&&rows.length>0?rows[0].data||[]:[];
+    const local=readLocalSnapshot();
+    // Conflict guard: if local backup holds more trades than the cloud, the cloud may have been clobbered.
+    if(local&&Array.isArray(local.trades)&&local.trades.length>cloud.length){
+      const when=new Date(local.ts).toLocaleString();
+      const ok=confirm(`⚠ Data check:\n\nThe cloud has ${cloud.length} trade(s), but your local backup from ${when} has ${local.trades.length}.\n\nThis can happen if a save was overwritten. Restore the larger local backup? (Recommended)`);
+      if(ok){
+        trades=local.trades;
+        trades.forEach(t=>{if(!t.result)t.result='win';if(!t.direction)t.direction='';if(!t.postOutcome)t.postOutcome='';if(!t.beOutcome)t.beOutcome='';});
+        await saveTrades();
+        setSaveState('saved','Restored');render();
+        return;
+      }
+    }
+    trades=cloud;
     trades.forEach(t=>{if(!t.result)t.result='win';if(!t.direction)t.direction='';if(!t.postOutcome)t.postOutcome='';if(!t.beOutcome)t.beOutcome='';});
+    saveLocalSnapshot();
     setSaveState('saved','Connected');render();
   }catch(e){setSaveState('error','Connection error');render();}
 }
 async function saveTrades(){
   setSaveState('saving','Saving...');
+  saveLocalSnapshot();
   try{
     await dbFetch('crt_trades',{method:'POST',headers:{'Prefer':'resolution=merge-duplicates,return=representation'},body:JSON.stringify({id:DB_ID,data:trades,updated_at:new Date().toISOString()})});
+    saveLocalSnapshot();
     setSaveState('saved','Saved');setTimeout(()=>setSaveState('saved','Connected'),2000);
   }catch(e){setSaveState('error','Save failed');}
+}
+function restoreLocalBackup(){
+  const local=readLocalSnapshot();
+  if(!local||!Array.isArray(local.trades)||local.trades.length===0){alert('No local backup found yet.');return;}
+  const when=new Date(local.ts).toLocaleString();
+  if(confirm(`Restore ${local.trades.length} trade(s) from local backup saved ${when}?\n\nThis replaces what's currently loaded and saves it to the cloud.`)){
+    trades=local.trades;
+    trades.forEach(t=>{if(!t.result)t.result='win';if(!t.direction)t.direction='';if(!t.postOutcome)t.postOutcome='';if(!t.beOutcome)t.beOutcome='';});
+    saveTrades();render();
+  }
+  document.getElementById('export-menu').classList.remove('open');
 }
 function setSaveState(state,label){document.getElementById('save-dot').className=`save-dot ${state}`;document.getElementById('save-label').textContent=label;}
 
